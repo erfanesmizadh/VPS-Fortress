@@ -44,22 +44,26 @@ New SSH port (Default 2222)
 ✅ پشتیبان‌گیری خودکار از SSH و امکان rollback
 🛠️ دستورات وضعیت
 بررسی وضعیت UFW:
-Copy code
-Bash
+
+```Bash
 sudo ufw status verbose
+```
 بررسی وضعیت Fail2ban:
-Copy code
-Bash
+
+```Bash
 sudo fail2ban-client status
+```
 مشاهده IP های بلاک شده:
-Copy code
-Bash
+
+```Bash
 sudo ipset list banned
+```
 بازگردانی SSH در صورت مشکل:
-Copy code
-Bash
+
+```Bash
 sudo cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
 sudo systemctl restart sshd
+```
 🔒 نکات امنیتی
 قبل از تغییر پورت SSH، اسکریپت تست config و port انجام می‌دهد
 اگر SSH روی پورت جدید fail شود، اسکریپت به صورت خودکار revert می‌کند
