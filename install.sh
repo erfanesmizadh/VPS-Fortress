@@ -5,9 +5,19 @@
 # Author: @AVASH_NET
 # =============================================
 
+BRAND="AVASH_NET"
+
+# --- Colors for menu & output ---
+RED="\e[31m"
+GREEN="\e[32m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+CYAN="\e[36m"
+RESET="\e[0m"
+
 # --- Check root ---
 if [[ $EUID -ne 0 ]]; then
-    echo "This script must be run as root."
+    echo -e "${RED}This script must be run as root.${RESET}"
     exit 1
 fi
 
@@ -16,7 +26,15 @@ DEFAULT_USER_PORTS="2100,2200,8080,8880"
 DEFAULT_TRAFFIC_PORTS="80,443,8080"
 DEFAULT_SSH_PORT="2222"
 
-# --- Update sources.list for ARM64 / Ubuntu Jammy ---
+# --- Banner ---
+echo -e "${CYAN}"
+echo "+--------------------------------------+"
+echo "|         VPS SECURITY ENTERPRISE      |"
+echo "|               $BRAND                 |"
+echo "+--------------------------------------+"
+echo -e "${RESET}"
+
+# --- Update sources.list ---
 echo "Fixing sources.list for ARM64 Ubuntu Jammy..."
 cat > /etc/apt/sources.list <<EOL
 deb http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
@@ -31,7 +49,7 @@ apt update -y && apt upgrade -y
 echo "Installing required packages..."
 apt install -y ufw fail2ban ipset iptables-persistent curl netcat-openbsd
 
-# --- User Inputs with Defaults ---
+# --- User Inputs ---
 read -p "User ports (Default $DEFAULT_USER_PORTS): " USER_PORTS
 USER_PORTS=${USER_PORTS:-$DEFAULT_USER_PORTS}
 
@@ -45,37 +63,20 @@ NEW_SSH_PORT=${NEW_SSH_PORT:-$DEFAULT_SSH_PORT}
 echo "Backing up SSH config..."
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-# --- Configure SSH safely ---
-echo "Configuring SSH securely..."
+# --- Configure SSH ---
 SSHD_CONF="/etc/ssh/sshd_config"
-sed -i "/Port $NEW_SSH_PORT/d" $SSHD_CONF
+sed -i '/^Port/d' $SSHD_CONF
+sed -i '/^PasswordAuthentication/d' $SSHD_CONF
+sed -i '/^PermitRootLogin/d' $SSHD_CONF
 echo "Port $NEW_SSH_PORT" >> $SSHD_CONF
-sed -i "s/^PermitRootLogin .*/PermitRootLogin no/" $SSHD_CONF
+echo "PasswordAuthentication yes" >> $SSHD_CONF
+echo "PermitRootLogin yes" >> $SSHD_CONF
 
 # --- Test SSH config ---
-sshd -t
-if [[ $? -ne 0 ]]; then
-    echo "Error in SSH config! Changes not applied."
-    exit 1
-fi
+sshd -t || { echo -e "${RED}SSH config error!${RESET}"; exit 1; }
 
-# --- Open new SSH port temporarily ---
+# --- Open SSH port temporarily ---
 ufw allow $NEW_SSH_PORT/tcp
-
-# --- Test SSH port locally ---
-nc -z -w5 127.0.0.1 $NEW_SSH_PORT
-if [[ $? -ne 0 ]]; then
-    echo "Error: SSH port $NEW_SSH_PORT not open! Aborting."
-    exit 1
-fi
-
-# --- Restart SSH safely ---
-systemctl restart sshd
-if [[ $? -ne 0 ]]; then
-    echo "Failed to restart SSH on port $NEW_SSH_PORT. Check config!"
-    exit 1
-fi
-echo "✅ SSH is now active on port $NEW_SSH_PORT."
 
 # --- Setup UFW ---
 ufw default deny incoming
@@ -94,7 +95,11 @@ done
 
 ufw --force enable
 
-# --- Setup fail2ban ---
+# --- Restart SSH ---
+systemctl restart sshd || { echo -e "${RED}Failed to restart SSH!${RESET}"; exit 1; }
+echo -e "${GREEN}✅ SSH is active on port $NEW_SSH_PORT${RESET}"
+
+# --- Setup fail2ban with iptables action ---
 systemctl enable fail2ban
 systemctl start fail2ban
 
@@ -107,6 +112,7 @@ filter = sshd
 logpath = /var/log/auth.log
 maxretry = 5
 bantime = 3600
+action = iptables[name=SSH, port=$NEW_SSH_PORT, protocol=tcp]
 
 [ufw]
 enabled = true
@@ -118,37 +124,47 @@ EOL
 
 systemctl restart fail2ban
 
-# --- Setup ipset + iptables ---
+# --- Setup ipset + iptables persistently ---
 ipset create banned hash:ip hashsize 4096 maxelem 100000 -exist
-iptables -I INPUT -m set --match-set banned src -j DROP
+iptables -C INPUT -m set --match-set banned src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set banned src -j DROP
+netfilter-persistent save
 
-mkdir -p /etc/fail2ban/action.d
-cat > /etc/fail2ban/action.d/ipset.conf <<EOL
-[Definition]
-actionstart =
-actionstop =
-actioncheck =
-actionban = ipset add banned <ip>
-actionunban = ipset del banned <ip>
-EOL
-
-# --- Add Cloudflare / CDN IPs ---
+# --- Cloudflare / CDN IPs in allow list ---
+ipset create allow_cf hash:ip hashsize 4096 maxelem 100000 -exist
 CF_IPS=("173.245.48.0/20" "103.21.244.0/22" "103.22.200.0/22" "103.31.4.0/22" "141.101.64.0/18" "108.162.192.0/18")
 for ip in "${CF_IPS[@]}"; do
-    ipset add banned $ip -exist
+    ipset add allow_cf $ip -exist
 done
 
-# --- Final Report ---
-echo "======================================="
-echo "✅ VPS Security Enterprise is active!"
-echo "SSH is on port: $NEW_SSH_PORT and root login is disabled."
-echo "User ports opened: $USER_PORTS"
-echo "Traffic ports opened: $TRAFFIC_PORTS"
-echo "Fail2ban is active and suspicious IPs are blocked."
-echo "UFW is active and default block rules applied."
-echo "Cloudflare/CDN IPs added to block list."
-echo "SSH backup: /etc/ssh/sshd_config.bak"
-echo "Check UFW status: sudo ufw status verbose"
-echo "Check Fail2ban status: sudo fail2ban-client status"
-echo "Blocked IPs: sudo ipset list banned"
-echo "======================================="
+# --- Disable root login automatically after first SSH login ---
+ROOT_LOCK_FILE="/root/.root_locked"
+if [ ! -f "$ROOT_LOCK_FILE" ]; then
+    echo "After your first SSH login, root login will be disabled automatically for security."
+    cat >> /root/.bashrc <<'EOF'
+
+# --- Auto-disable root login ---
+LOCK_FILE="$HOME/.root_locked"
+if [ ! -f "$LOCK_FILE" ]; then
+    sed -i 's/^PermitRootLogin yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    systemctl restart sshd
+    touch "$LOCK_FILE"
+    echo "✅ Root login disabled automatically for security."
+fi
+EOF
+fi
+
+# --- Final Report (Beautiful Table) ---
+echo -e "${CYAN}+----------------------+---------------------------+"
+echo -e "| ${YELLOW}Feature${CYAN}               | ${YELLOW}Status${CYAN}                    |"
+echo -e "+----------------------+---------------------------+"
+echo -e "| SSH Port             | ${GREEN}$NEW_SSH_PORT${CYAN}                 |"
+echo -e "| Password Auth        | ${GREEN}Enabled temporarily${CYAN} |"
+echo -e "| Root Login           | ${GREEN}Enabled temporarily${CYAN} |"
+echo -e "| User Ports           | ${GREEN}$USER_PORTS${CYAN}         |"
+echo -e "| Traffic Ports        | ${GREEN}$TRAFFIC_PORTS${CYAN}       |"
+echo -e "| Fail2ban             | ${GREEN}Active${CYAN}              |"
+echo -e "| UFW                  | ${GREEN}Active${CYAN}              |"
+echo -e "| Cloudflare Allow IPs | ${GREEN}Added${CYAN}               |"
+echo -e "+----------------------+---------------------------+"
+echo -e "${RESET}"
+echo -e "${GREEN}✅ $BRAND VPS Security Setup Complete!${RESET}"
