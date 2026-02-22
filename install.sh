@@ -1,7 +1,8 @@
 #!/bin/bash
 # =============================================
-# VPS Security Enterprise - Safe SSH Upgrade with Auto-Revert
-# Author: @AVASH_NET
+# VPS Security Enterprise - Safe SSH Upgrade
+# ARM64 / Ubuntu Jammy version
+# Author: ChatGPT
 # =============================================
 
 # --- Check root ---
@@ -15,6 +16,21 @@ DEFAULT_USER_PORTS="2100,2200,8080,8880"
 DEFAULT_TRAFFIC_PORTS="80,443,8080"
 DEFAULT_SSH_PORT="2222"
 
+# --- Update sources.list for ARM64 / Ubuntu Jammy ---
+echo "Fixing sources.list for ARM64 Ubuntu Jammy..."
+cat > /etc/apt/sources.list <<EOL
+deb http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
+EOL
+
+apt clean
+apt update -y && apt upgrade -y
+
+# --- Install required packages ---
+echo "Installing required packages..."
+apt install -y ufw fail2ban ipset iptables-persistent curl netcat-openbsd
+
 # --- User Inputs with Defaults ---
 read -p "User ports (Default $DEFAULT_USER_PORTS): " USER_PORTS
 USER_PORTS=${USER_PORTS:-$DEFAULT_USER_PORTS}
@@ -25,54 +41,41 @@ TRAFFIC_PORTS=${TRAFFIC_PORTS:-$DEFAULT_TRAFFIC_PORTS}
 read -p "New SSH port (Default $DEFAULT_SSH_PORT): " NEW_SSH_PORT
 NEW_SSH_PORT=${NEW_SSH_PORT:-$DEFAULT_SSH_PORT}
 
-# --- Update system ---
-echo "Updating system..."
-apt update -y && apt upgrade -y
-
-# --- Install required packages ---
-echo "Installing ufw, fail2ban, ipset, iptables-persistent, curl..."
-apt install ufw fail2ban ipset iptables-persistent curl -y
-
 # --- Backup SSH ---
 echo "Backing up SSH config..."
-SSHD_CONF="/etc/ssh/sshd_config"
-cp $SSHD_CONF $SSHD_CONF.bak
+cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
 # --- Configure SSH safely ---
 echo "Configuring SSH securely..."
-
-# Remove any existing Port NEW_SSH_PORT lines
+SSHD_CONF="/etc/ssh/sshd_config"
 sed -i "/Port $NEW_SSH_PORT/d" $SSHD_CONF
 echo "Port $NEW_SSH_PORT" >> $SSHD_CONF
-
-# Disable root login
 sed -i "s/^PermitRootLogin .*/PermitRootLogin no/" $SSHD_CONF
 
 # --- Test SSH config ---
 sshd -t
 if [[ $? -ne 0 ]]; then
-    echo "SSH config test failed! Reverting..."
-    cp $SSHD_CONF.bak $SSHD_CONF
+    echo "Error in SSH config! Changes not applied."
     exit 1
 fi
 
-# --- Open new SSH port in ufw temporarily ---
+# --- Open new SSH port temporarily ---
 ufw allow $NEW_SSH_PORT/tcp
 
-# --- Restart SSH safely with rollback ---
-systemctl restart sshd
-sleep 2
-
-# Test SSH port is listening
+# --- Test SSH port locally ---
 nc -z -w5 127.0.0.1 $NEW_SSH_PORT
 if [[ $? -ne 0 ]]; then
-    echo "SSH on new port failed! Rolling back to previous config..."
-    cp $SSHD_CONF.bak $SSHD_CONF
-    systemctl restart sshd
+    echo "Error: SSH port $NEW_SSH_PORT not open! Aborting."
     exit 1
 fi
 
-echo "✅ SSH is active on port $NEW_SSH_PORT"
+# --- Restart SSH safely ---
+systemctl restart sshd
+if [[ $? -ne 0 ]]; then
+    echo "Failed to restart SSH on port $NEW_SSH_PORT. Check config!"
+    exit 1
+fi
+echo "✅ SSH is now active on port $NEW_SSH_PORT."
 
 # --- Setup UFW ---
 ufw default deny incoming
@@ -95,6 +98,7 @@ ufw --force enable
 systemctl enable fail2ban
 systemctl start fail2ban
 
+mkdir -p /etc/fail2ban/jail.d
 cat > /etc/fail2ban/jail.d/custom.conf <<EOL
 [sshd]
 enabled = true
