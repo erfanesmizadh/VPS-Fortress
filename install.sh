@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================
-# Enterprise VPS Security Script
+# VPS Security Enterprise - Safe SSH Upgrade
 # Author: ChatGPT
 # =============================================
 
@@ -19,23 +19,55 @@ read -p "پورت SSH جدید شما (مثلا 2222): " NEW_SSH_PORT
 echo "در حال بروزرسانی سیستم..."
 apt update -y && apt upgrade -y
 
-# --- Install packages ---
+# --- Install required packages ---
 echo "در حال نصب ufw, fail2ban, ipset, iptables-persistent, curl..."
 apt install ufw fail2ban ipset iptables-persistent curl -y
 
 # --- Backup SSH ---
 cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-# --- SSH Security ---
-sed -i "s/#Port 22/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
-sed -i "s/Port 22/Port $NEW_SSH_PORT/" /etc/ssh/sshd_config
-sed -i "s/PermitRootLogin yes/PermitRootLogin no/" /etc/ssh/sshd_config
+# --- Configure SSH safely ---
+echo "در حال پیکربندی SSH به صورت امن..."
+SSHD_CONF="/etc/ssh/sshd_config"
+
+# Remove any existing Port NEW_SSH_PORT lines
+sed -i "/Port $NEW_SSH_PORT/d" $SSHD_CONF
+echo "Port $NEW_SSH_PORT" >> $SSHD_CONF
+
+# Disable root login
+sed -i "s/^PermitRootLogin .*/PermitRootLogin no/" $SSHD_CONF
+
+# --- Test new SSH port locally ---
+echo "تست اتصال به پورت SSH جدید روی localhost..."
+sshd -t
+if [[ $? -ne 0 ]]; then
+    echo "خطا در پیکربندی SSH! تغییرات اعمال نمی‌شوند."
+    exit 1
+fi
+
+# Open new SSH port in ufw temporarily
+ufw allow $NEW_SSH_PORT/tcp
+
+# Test SSH connection locally using netcat
+nc -z -w5 127.0.0.1 $NEW_SSH_PORT
+if [[ $? -ne 0 ]]; then
+    echo "خطا: پورت SSH جدید باز نیست یا مشکل دارد!"
+    echo "دسترسی از راه دور امن نیست، تغییر پورت انجام نشد."
+    exit 1
+fi
+
+# --- Restart SSH safely ---
 systemctl restart sshd
+if [[ $? -ne 0 ]]; then
+    echo "راه‌اندازی SSH با پورت جدید ناموفق بود. بررسی کنید!"
+    exit 1
+fi
+
+echo "✅ SSH با پورت $NEW_SSH_PORT فعال شد."
 
 # --- Setup UFW ---
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow $NEW_SSH_PORT/tcp
 ufw limit $NEW_SSH_PORT/tcp
 
 # Allow user ports
@@ -56,7 +88,6 @@ ufw --force enable
 systemctl enable fail2ban
 systemctl start fail2ban
 
-# Custom fail2ban configuration
 cat > /etc/fail2ban/jail.d/custom.conf <<EOL
 [sshd]
 enabled = true
@@ -76,11 +107,10 @@ EOL
 
 systemctl restart fail2ban
 
-# --- Setup ipset + iptables for auto-block ---
+# --- Setup ipset + iptables ---
 ipset create banned hash:ip hashsize 4096 maxelem 100000 -exist
 iptables -I INPUT -m set --match-set banned src -j DROP
 
-# Fail2ban action for ipset
 mkdir -p /etc/fail2ban/action.d
 cat > /etc/fail2ban/action.d/ipset.conf <<EOL
 [Definition]
@@ -91,16 +121,15 @@ actionban = ipset add banned <ip>
 actionunban = ipset del banned <ip>
 EOL
 
-# --- Add Cloudflare / CDN IP ranges automatically ---
-echo "در حال اضافه کردن IP های Cloudflare به لیست بلاک (اختیاری)..."
+# --- Add Cloudflare / CDN IPs ---
 CF_IPS=("173.245.48.0/20" "103.21.244.0/22" "103.22.200.0/22" "103.31.4.0/22" "141.101.64.0/18" "108.162.192.0/18")
 for ip in "${CF_IPS[@]}"; do
     ipset add banned $ip -exist
 done
 
-# --- Reporting & Monitoring ---
+# --- Final Report ---
 echo "======================================="
-echo "✅ VPS Security Enterprise فعال شد!"
+echo "✅  VPS Security Enterprise فعال شد!"
 echo "SSH روی پورت: $NEW_SSH_PORT و root login غیرفعال شد."
 echo "پورت‌های یوزر باز شدند: $USER_PORTS"
 echo "پورت‌های ترافیک باز شدند: $TRAFFIC_PORTS"
