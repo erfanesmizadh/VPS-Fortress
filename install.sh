@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================
 # VPS Security Enterprise - Safe SSH Upgrade with Auto-Revert
-# Author: ChatGPT
+# Author: @AVASH_NET
 # =============================================
 
 # --- Check root ---
