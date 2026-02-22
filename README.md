@@ -21,7 +21,7 @@ VPS-Fortress یک اسکریپت Bash برای افزایش امنیت سرور�
 ```bash
 curl -O https://raw.githubusercontent.com/erfanesmizadh/VPS-Fortress/main/install.sh
 chmod +x install.sh
-sudo bash install.sh
+sudo bash install.sh```
 
 
 
