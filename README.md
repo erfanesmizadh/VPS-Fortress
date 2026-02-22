@@ -21,4 +21,6 @@
 برای اجرای اسکریپت کافیست یک دستور در سرور خود وارد کنید:
 
 ```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/erfanesmizadh/VPS-Fortress/main/install.sh)
+curl -O https://raw.githubusercontent.com/erfanesmizadh/VPS-Fortress/main/install.sh
+chmod +x install.sh
+sudo bash install.sh
