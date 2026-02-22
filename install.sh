@@ -2,7 +2,7 @@
 # =============================================
 # VPS Security Enterprise - Safe SSH Upgrade
 # ARM64 / Ubuntu Jammy version
-# Author: ChatGPT
+# Author: @AVASH_NET
 # =============================================
 
 # --- Check root ---
