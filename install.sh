@@ -1,34 +1,45 @@
 #!/bin/bash
 # =============================================
-# VPS Security Enterprise - Safe SSH Upgrade
+# VPS Security Enterprise - Safe SSH Upgrade with Auto-Revert
 # Author: ChatGPT
 # =============================================
 
 # --- Check root ---
 if [[ $EUID -ne 0 ]]; then
-    echo "این اسکریپت باید با دسترسی root اجرا شود."
+    echo "This script must be run as root."
     exit 1
 fi
 
-# --- User Inputs ---
-read -p "پورت‌های یوزر (مثلا 2100,2101): " USER_PORTS
-read -p "پورت‌های ترافیک (مثلا 80,443,8080): " TRAFFIC_PORTS
-read -p "پورت SSH جدید شما (مثلا 2222): " NEW_SSH_PORT
+# --- Default Ports ---
+DEFAULT_USER_PORTS="2100,2200,8080,8880"
+DEFAULT_TRAFFIC_PORTS="80,443,8080"
+DEFAULT_SSH_PORT="2222"
+
+# --- User Inputs with Defaults ---
+read -p "User ports (Default $DEFAULT_USER_PORTS): " USER_PORTS
+USER_PORTS=${USER_PORTS:-$DEFAULT_USER_PORTS}
+
+read -p "Traffic ports (Default $DEFAULT_TRAFFIC_PORTS): " TRAFFIC_PORTS
+TRAFFIC_PORTS=${TRAFFIC_PORTS:-$DEFAULT_TRAFFIC_PORTS}
+
+read -p "New SSH port (Default $DEFAULT_SSH_PORT): " NEW_SSH_PORT
+NEW_SSH_PORT=${NEW_SSH_PORT:-$DEFAULT_SSH_PORT}
 
 # --- Update system ---
-echo "در حال بروزرسانی سیستم..."
+echo "Updating system..."
 apt update -y && apt upgrade -y
 
 # --- Install required packages ---
-echo "در حال نصب ufw, fail2ban, ipset, iptables-persistent, curl..."
+echo "Installing ufw, fail2ban, ipset, iptables-persistent, curl..."
 apt install ufw fail2ban ipset iptables-persistent curl -y
 
 # --- Backup SSH ---
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+echo "Backing up SSH config..."
+SSHD_CONF="/etc/ssh/sshd_config"
+cp $SSHD_CONF $SSHD_CONF.bak
 
 # --- Configure SSH safely ---
-echo "در حال پیکربندی SSH به صورت امن..."
-SSHD_CONF="/etc/ssh/sshd_config"
+echo "Configuring SSH securely..."
 
 # Remove any existing Port NEW_SSH_PORT lines
 sed -i "/Port $NEW_SSH_PORT/d" $SSHD_CONF
@@ -37,46 +48,42 @@ echo "Port $NEW_SSH_PORT" >> $SSHD_CONF
 # Disable root login
 sed -i "s/^PermitRootLogin .*/PermitRootLogin no/" $SSHD_CONF
 
-# --- Test new SSH port locally ---
-echo "تست اتصال به پورت SSH جدید روی localhost..."
+# --- Test SSH config ---
 sshd -t
 if [[ $? -ne 0 ]]; then
-    echo "خطا در پیکربندی SSH! تغییرات اعمال نمی‌شوند."
+    echo "SSH config test failed! Reverting..."
+    cp $SSHD_CONF.bak $SSHD_CONF
     exit 1
 fi
 
-# Open new SSH port in ufw temporarily
+# --- Open new SSH port in ufw temporarily ---
 ufw allow $NEW_SSH_PORT/tcp
 
-# Test SSH connection locally using netcat
+# --- Restart SSH safely with rollback ---
+systemctl restart sshd
+sleep 2
+
+# Test SSH port is listening
 nc -z -w5 127.0.0.1 $NEW_SSH_PORT
 if [[ $? -ne 0 ]]; then
-    echo "خطا: پورت SSH جدید باز نیست یا مشکل دارد!"
-    echo "دسترسی از راه دور امن نیست، تغییر پورت انجام نشد."
+    echo "SSH on new port failed! Rolling back to previous config..."
+    cp $SSHD_CONF.bak $SSHD_CONF
+    systemctl restart sshd
     exit 1
 fi
 
-# --- Restart SSH safely ---
-systemctl restart sshd
-if [[ $? -ne 0 ]]; then
-    echo "راه‌اندازی SSH با پورت جدید ناموفق بود. بررسی کنید!"
-    exit 1
-fi
-
-echo "✅ SSH با پورت $NEW_SSH_PORT فعال شد."
+echo "✅ SSH is active on port $NEW_SSH_PORT"
 
 # --- Setup UFW ---
 ufw default deny incoming
 ufw default allow outgoing
 ufw limit $NEW_SSH_PORT/tcp
 
-# Allow user ports
 IFS=',' read -ra UP <<< "$USER_PORTS"
 for port in "${UP[@]}"; do
     ufw allow "$port"/tcp
 done
 
-# Allow traffic ports
 IFS=',' read -ra TP <<< "$TRAFFIC_PORTS"
 for port in "${TP[@]}"; do
     ufw allow "$port"/tcp
@@ -129,15 +136,15 @@ done
 
 # --- Final Report ---
 echo "======================================="
-echo "✅  VPS Security Enterprise فعال شد!"
-echo "SSH روی پورت: $NEW_SSH_PORT و root login غیرفعال شد."
-echo "پورت‌های یوزر باز شدند: $USER_PORTS"
-echo "پورت‌های ترافیک باز شدند: $TRAFFIC_PORTS"
-echo "Fail2ban فعال و آی‌پی‌های مشکوک بلاک می‌شوند."
-echo "ufw فعال و بلاک پیش‌فرض اعمال شد."
-echo "Cloudflare/CDN IP ها به لیست بلاک اضافه شدند."
-echo "نسخه پشتیبان SSH: /etc/ssh/sshd_config.bak"
-echo "برای وضعیت ufw: sudo ufw status verbose"
-echo "برای وضعیت fail2ban: sudo fail2ban-client status"
-echo "برای آی‌پی‌های بلاک شده: sudo ipset list banned"
+echo "✅ VPS Security Enterprise is active!"
+echo "SSH is on port: $NEW_SSH_PORT and root login is disabled."
+echo "User ports opened: $USER_PORTS"
+echo "Traffic ports opened: $TRAFFIC_PORTS"
+echo "Fail2ban is active and suspicious IPs are blocked."
+echo "UFW is active and default block rules applied."
+echo "Cloudflare/CDN IPs added to block list."
+echo "SSH backup: /etc/ssh/sshd_config.bak"
+echo "Check UFW status: sudo ufw status verbose"
+echo "Check Fail2ban status: sudo fail2ban-client status"
+echo "Blocked IPs: sudo ipset list banned"
 echo "======================================="
