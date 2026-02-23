@@ -1,146 +1,133 @@
 #!/bin/bash
 # =============================================
-# VPS SECURITY ENTERPRISE - ARM64 / Ubuntu Jammy
+# VPS SECURITY PRO MENU + BBR + ROOT LOGIN
 # Author: @AVASH_NET
 # =============================================
 
 BRAND="AVASH_NET"
 
-# --- Colors ---
 RED="\e[31m"; GREEN="\e[32m"; YELLOW="\e[33m"; CYAN="\e[36m"; RESET="\e[0m"
 
-# --- Root check ---
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}❌ Run this script as root!${RESET}"
+    echo -e "${RED}Run as root!${RESET}"
     exit 1
 fi
 
-# --- Banner ---
-echo -e "${CYAN}+--------------------------------------+"
-echo "|         VPS SECURITY ENTERPRISE      |"
-echo "|               $BRAND                 |"
-echo "+--------------------------------------+${RESET}"
+# --- Helper Functions ---
+check_sshd() {
+    sshd -t >/dev/null 2>&1
+    return $?
+}
 
-# --- Fix sources for ARM64 ---
-echo "🔧 Fixing sources.list for ARM64 Ubuntu Jammy..."
-cat > /etc/apt/sources.list <<EOL
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
-EOL
-
-apt clean
-apt update -y
-apt --fix-broken install -y
-apt upgrade -y
-
-# --- Install required packages ---
-echo "📦 Installing required packages..."
-REQUIRED_PKGS=(ufw fail2ban iptables-persistent curl netcat-openbsd ipset)
-for pkg in "${REQUIRED_PKGS[@]}"; do
-    if ! dpkg -s $pkg >/dev/null 2>&1; then
-        if ! apt install -y $pkg; then
-            echo -e "${YELLOW}⚠️ Package $pkg not available, skipping...${RESET}"
-        fi
+enable_bbr() {
+    echo -e "${CYAN}🔹 Enabling BBR TCP congestion control...${RESET}"
+    modprobe tcp_bbr
+    echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+    sysctl -w net.core.default_qdisc=fq
+    sysctl -w net.ipv4.tcp_congestion_control=bbr
+    if sysctl net.ipv4.tcp_congestion_control | grep -q bbr; then
+        echo -e "${GREEN}✅ BBR is enabled${RESET}"
+    else
+        echo -e "${RED}❌ BBR failed${RESET}"
     fi
-done
+}
 
-# --- Default ports ---
-DEFAULT_USER_PORTS="2100,2200,8080,8880"
-DEFAULT_TRAFFIC_PORTS="80,443,8080"
-DEFAULT_SSH_PORT="2222"
-
-# --- User input ---
-read -p "User ports (Default $DEFAULT_USER_PORTS): " USER_PORTS
-USER_PORTS=${USER_PORTS:-$DEFAULT_USER_PORTS}
-
-read -p "Traffic ports (Default $DEFAULT_TRAFFIC_PORTS): " TRAFFIC_PORTS
-TRAFFIC_PORTS=${TRAFFIC_PORTS:-$DEFAULT_TRAFFIC_PORTS}
-
-read -p "SSH Port (Default $DEFAULT_SSH_PORT): " NEW_SSH_PORT
-NEW_SSH_PORT=${NEW_SSH_PORT:-$DEFAULT_SSH_PORT}
-
-# --- Backup SSH ---
-cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-sed -i '/^Port/d;/^PasswordAuthentication/d;/^PermitRootLogin/d' /etc/ssh/sshd_config
-echo -e "Port $NEW_SSH_PORT\nPasswordAuthentication yes\nPermitRootLogin yes" >> /etc/ssh/sshd_config
-sshd -t || { echo -e "${RED}❌ SSH config error!${RESET}"; exit 1; }
-
-# --- UFW setup ---
-ufw default deny incoming
-ufw default allow outgoing
-ufw limit $NEW_SSH_PORT/tcp
-
-IFS=',' read -ra UP <<< "$USER_PORTS"
-for p in "${UP[@]}"; do ufw allow $p/tcp; done
-
-IFS=',' read -ra TP <<< "$TRAFFIC_PORTS"
-for p in "${TP[@]}"; do ufw allow $p/tcp; done
-
-ufw --force enable
-
-# --- Restart SSH safely ---
-systemctl restart sshd
-echo -e "${GREEN}✅ SSH is active on port $NEW_SSH_PORT${RESET}"
-
-# --- Fail2ban setup ---
-systemctl enable fail2ban
-systemctl start fail2ban
-mkdir -p /etc/fail2ban/jail.d
-cat > /etc/fail2ban/jail.d/custom.conf <<EOL
-[sshd]
-enabled = true
-port = $NEW_SSH_PORT
-filter = sshd
-logpath = /var/log/auth.log
-maxretry = 5
-bantime = 3600
-action = iptables[name=SSH, port=$NEW_SSH_PORT, protocol=tcp]
-EOL
-systemctl restart fail2ban
-
-# --- ipset setup if available ---
-if command -v ipset >/dev/null 2>&1; then
-    ipset create banned hash:ip hashsize 4096 maxelem 100000 -exist
-    iptables -C INPUT -m set --match-set banned src -j DROP 2>/dev/null || iptables -I INPUT -m set --match-set banned src -j DROP
-    ipset create allow_cf hash:ip hashsize 4096 maxelem 100000 -exist
-    CF_IPS=("173.245.48.0/20" "103.21.244.0/22" "103.22.200.0/22" "103.31.4.0/22" "141.101.64.0/18" "108.162.192.0/18")
-    for ip in "${CF_IPS[@]}"; do ipset add allow_cf $ip -exist; done
-else
-    echo -e "${YELLOW}⚠️ ipset not available, skipping IP sets setup.${RESET}"
-fi
-
-# --- Auto-disable root login after first SSH login ---
-ROOT_LOCK_FILE="/root/.root_locked"
-if [ ! -f "$ROOT_LOCK_FILE" ]; then
-    cat >> /root/.bashrc <<'EOF'
-
-# --- Auto-disable root login after first SSH login ---
-LOCK_FILE="$HOME/.root_locked"
-if [ ! -f "$LOCK_FILE" ]; then
-    sed -i 's/^PermitRootLogin yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-    systemctl restart sshd
-    touch "$LOCK_FILE"
-    echo "✅ Root login disabled automatically for security."
-fi
+configure_ssh() {
+    DEFAULT_SSH_PORT="2222"
+    read -p "SSH Port (Default $DEFAULT_SSH_PORT): " NEW_SSH_PORT
+    NEW_SSH_PORT=${NEW_SSH_PORT:-$DEFAULT_SSH_PORT}
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+    sed -i '/^Port/d;/^PermitRootLogin/d;/^PasswordAuthentication/d;/^UseDNS/d' /etc/ssh/sshd_config
+    cat >> /etc/ssh/sshd_config <<EOF
+Port $NEW_SSH_PORT
+PermitRootLogin yes
+PasswordAuthentication yes
+UseDNS no
+LoginGraceTime 60
 EOF
-fi
+    check_sshd || { echo -e "${RED}SSH config error!${RESET}"; return 1; }
+    systemctl restart sshd
+    echo -e "${GREEN}✅ SSH running on port $NEW_SSH_PORT with root login enabled${RESET}"
+}
 
-# --- Final Report Table ---
-echo -e "${CYAN}+----------------------+---------------------------+"
-echo -e "| Feature              | Status                    |"
-echo -e "+----------------------+---------------------------+"
-echo -e "| SSH Port             | ${GREEN}$NEW_SSH_PORT${CYAN}                 |"
-echo -e "| Password Auth        | ${GREEN}Enabled temporarily${CYAN} |"
-echo -e "| Root Login           | ${GREEN}Enabled temporarily${CYAN} |"
-echo -e "| User Ports           | ${GREEN}$USER_PORTS${CYAN}         |"
-echo -e "| Traffic Ports        | ${GREEN}$TRAFFIC_PORTS${CYAN}       |"
-echo -e "| Fail2ban             | ${GREEN}Active${CYAN}              |"
-echo -e "| UFW                  | ${GREEN}Active${CYAN}              |"
-if command -v ipset >/dev/null 2>&1; then
-    echo -e "| Cloudflare Allow IPs | ${GREEN}Added${CYAN}               |"
-else
-    echo -e "| Cloudflare Allow IPs | ${YELLOW}Skipped${CYAN}             |"
-fi
-echo -e "+----------------------+---------------------------+${RESET}"
-echo -e "${GREEN}✅ $BRAND VPS Security Setup Complete!${RESET}"
+configure_firewall() {
+    DEFAULT_USER_PORTS="2100,2200,8080,8880"
+    DEFAULT_TRAFFIC_PORTS="80,443,8080"
+
+    read -p "User ports (Default $DEFAULT_USER_PORTS): " USER_PORTS
+    USER_PORTS=${USER_PORTS:-$DEFAULT_USER_PORTS}
+    read -p "Traffic ports (Default $DEFAULT_TRAFFIC_PORTS): " TRAFFIC_PORTS
+    TRAFFIC_PORTS=${TRAFFIC_PORTS:-$DEFAULT_TRAFFIC_PORTS}
+
+    # Convert Persian comma
+    USER_PORTS=$(echo "$USER_PORTS" | tr '،' ',')
+    TRAFFIC_PORTS=$(echo "$TRAFFIC_PORTS" | tr '،' ',')
+
+    # Merge & validate
+    ALL_PORTS="$USER_PORTS,$TRAFFIC_PORTS"
+    ALL_PORTS=$(echo "$ALL_PORTS" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+    VALID_PORTS=""
+    for p in $(echo $ALL_PORTS | tr ',' ' '); do
+        if [[ $p =~ ^[0-9]+$ ]] && [ "$p" -ge 1 ] && [ "$p" -le 65535 ]; then
+            VALID_PORTS+="$p,"
+        else
+            echo -e "${YELLOW}⚠️ Skipping invalid port: $p${RESET}"
+        fi
+    done
+    VALID_PORTS=$(echo $VALID_PORTS | sed 's/,$//')
+
+    # UFW rules
+    ufw reset
+    ufw default deny incoming
+    ufw default allow outgoing
+
+    # Allow ports
+    read -p "Enter SSH port to allow: " SSH_PORT
+    ufw allow "$SSH_PORT"/tcp
+    for p in $(echo $VALID_PORTS | tr ',' ' '); do
+        ufw allow "$p"/tcp
+    done
+    ufw --force enable
+    echo -e "${GREEN}✅ Firewall configured${RESET}"
+}
+
+setup_fail2ban() {
+    apt install -y fail2ban
+    systemctl enable fail2ban
+    systemctl restart fail2ban
+    echo -e "${GREEN}✅ Fail2ban is active${RESET}"
+}
+
+show_report() {
+    echo -e "${CYAN}+----------------------+---------------------------+"
+    echo -e "| Feature              | Status                    |"
+    echo -e "+----------------------+---------------------------+"
+    echo -e "| SSH Port             | ${GREEN}$SSH_PORT${CYAN}                 |"
+    echo -e "| Root Login           | ${GREEN}Always Enabled${CYAN}     |"
+    echo -e "| Open Ports           | ${GREEN}$VALID_PORTS${CYAN}       |"
+    echo -e "| Firewall (UFW)       | ${GREEN}Active${CYAN}              |"
+    echo -e "| Fail2ban             | ${GREEN}Active${CYAN}              |"
+    echo -e "| BBR                  | ${GREEN}Enabled${CYAN}             |"
+    echo -e "+----------------------+---------------------------+${RESET}"
+}
+
+# --- Menu ---
+while true; do
+    echo -e "${CYAN}+---------------- VPS SECURITY PRO MENU ----------------+${RESET}"
+    echo "1) Configure SSH + Enable Root Login"
+    echo "2) Configure Firewall (UFW + Ports)"
+    echo "3) Setup Fail2ban"
+    echo "4) Enable BBR TCP Acceleration"
+    echo "5) Show Current Status"
+    echo "0) Exit"
+    read -p "Select option: " choice
+    case $choice in
+        1) configure_ssh ;;
+        2) configure_firewall ;;
+        3) setup_fail2ban ;;
+        4) enable_bbr ;;
+        5) show_report ;;
+        0) echo "Exiting..."; exit 0 ;;
+        *) echo -e "${YELLOW}Invalid option!${RESET}" ;;
+    esac
+done
